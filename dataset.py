@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 
 
 class HAM10000(Dataset):
-    def __init__(self, df, path, equalize=False, augment=True, testing=False):
+    def __init__(self, df, path, equalize=False, augment=True, testing=False, do_mixup=False):
         '''
         Initialize dataset with HAM10000 data based on Kaggle dataset structure
 
@@ -30,10 +30,14 @@ class HAM10000(Dataset):
         self.testing = testing
         if equalize:
             self.balance()
+        self.do_mixup = do_mixup
 
     def __len__(self):
         # Return length of dataset
         return len(self.df)
+    
+    def set_do_mixup(self, new_val):
+        self.do_mixup = new_val
     
     def collect_skin_data(self):
         '''
@@ -216,16 +220,53 @@ class HAM10000(Dataset):
         # resize image to 128x128
         # NOTE: Image cropping should be done to square of maximum size that fits image in center of image for testing data
         size = 256
-        image = image.resize((256, 256))
+        image = image.resize((size, size))
 
-        gt = torch.zeros(len(self.classes))
-        gt[self.classes[result["dx"]]] = 1.0
+        gt, sex_gt = None, None
+
+        if self.do_mixup:
+            rand_index = np.random.randint(0, len(self))
+            result2 = self.df.iloc[rand_index]
+            filename2 = result2["image_id"] + ".jpg"
+            path2 = self.path / "combined" / filename2
+            image2 = Image.open(path2)
+
+            if self.do_augment:
+                image2 = self.augment(image2)
+            
+            image2 = image2.resize((256, 256))
+
+            mixup_alpha = np.random.rand()
+            image = Image.blend(image, image2, mixup_alpha)
+            
+            gt = torch.zeros(len(self.classes))
+            gt[self.classes[result["dx"]]] += 1.0 - mixup_alpha
+            gt[self.classes[result2["dx"]]] += mixup_alpha
+
+            sex_gt = torch.zeros(2)
+            if result["sex"] == "male":
+                sex_gt[0] += 0.5
+            elif result2["sex"] == "female":
+                sex_gt[1] += 0.5
+            if result2["sex"] == "male":
+                sex_gt[0] += 0.5
+            elif result2["sex"] == "female":
+                sex_gt[1] += 0.5
+        else:
+            gt = torch.zeros(len(self.classes))
+            gt[self.classes[result["dx"]]] = 1.0
+
+            sex_gt = torch.zeros(2)
+            if result["sex"] == "male":
+                sex_gt[0] += 1.0
+            elif result["sex"] == "female":
+                sex_gt[1] += 1.0
 
         if self.testing:
             return torch.from_numpy(np.array(image).transpose((2, 0, 1)))/255, gt, self.pigment_dict[result["image_id"]]
         else:
-            return torch.from_numpy(np.array(image).transpose((2, 0, 1)))/255, gt
-        
+            return torch.from_numpy(np.array(image).transpose((2, 0, 1)))/255, gt, sex_gt
+
     def static_crop(self, image):
         '''
         crop to center of image

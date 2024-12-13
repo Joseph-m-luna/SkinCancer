@@ -46,12 +46,12 @@ def train_model():
 
     # loss function and optimizer
     criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     criterion_adv = torch.nn.CrossEntropyLoss()
-    optimizer_adv = torch.optim.SGD(adversary.parameters(), lr=0.001)
+    optimizer_adv = torch.optim.Adam(adversary.parameters(), lr=0.001)
 
-    adv_weight = 0.5
+    adv_weight = 0.1
 
     # training parameters
     epochs = 100
@@ -62,6 +62,13 @@ def train_model():
         device = torch.device("cpu")
     model.to(device)
     adversary.to(device)
+    do_adversary = False
+    do_mixup = False
+
+    # TEMP
+    # do_adversary = True
+    do_mixup = True
+    train_loader.dataset.set_do_mixup(False)
 
     # TensorBoard writer
     writer = SummaryWriter()
@@ -69,42 +76,76 @@ def train_model():
     for epoch in range(epochs):
         print(f"Epoch: {epoch}")
         total = 0
-        correct = 0
-        loss = 0
-        for i, (images, labels) in enumerate(train_loader):
+        loss_progress = 0
+        adv_loss_progress = 0
+        final_loss = 0
+        for i, (images, labels, sex) in enumerate(train_loader):
             # data
-            images, labels = images.to(device), labels.to(device)
+            if False:
+                print(f"labels: {labels[0]}")
+                print(f"sex: {sex[0]}")
+                plt.imshow(images[0].permute(1, 2, 0))
+                plt.show()
+            images, labels, sex = images.to(device), labels.to(device), sex.to(device)
             optimizer.zero_grad()
+            optimizer_adv.zero_grad()
             
             # model application
-            outputs = model(images)
+            outputs, embedding = model(images)
+            embedding = embedding.detach()
+
+            loss, adv_loss = None, None
+            if i % 100 == 0:
+                print(f"\nepoch: {epoch}, iter: {i}")
+                print(f"outputs: {outputs[0]}")
+                print(f"truth: {labels[0]}")
             
-            # loss formulation
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
+            if do_adversary:
+                adv_outputs = adversary(embedding)
+                adv_loss = criterion_adv(adv_outputs, sex)
+                adv_loss.backward()
+                optimizer_adv.step()
 
-            max_indices = torch.argmax(outputs, 1)
-            one_hots = torch.zeros_like(outputs).scatter_(1, max_indices.unsqueeze(1), 1.0)
+                loss = criterion(outputs, labels) - adv_weight * adv_loss.detach()
+                loss.backward()
+                optimizer.step()
+            else:
+                # loss formulation
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
 
-            correct += (one_hots * labels).sum().item()
-            total += labels.size(0)
-            loss += loss.item()
+            # max_indices = torch.argmax(outputs, 1)
+            # one_hots = torch.zeros_like(outputs).scatter_(1, max_indices.unsqueeze(1), 1.0)
+
+            total += 1
+            loss_progress += loss.item()
+
+            if do_adversary:
+                adv_loss_progress += adv_loss.item()
+                final_loss = loss.item() - adv_loss.item() * adv_weight
 
             # Log loss and outputs to TensorBoard
-            writer.add_scalar('Loss/train', loss.item(), epoch * len(train_loader) + i)
-
-            if total >= 5000:
-                accuracy = 100 * correct / total
-                writer.add_scalar('Accuracy/train', accuracy, epoch * len(train_loader) + i)
+            if total >= 100:
+                writer.add_scalar('Model Loss/train', loss.item()/total, epoch * len(train_loader) + i)
                 
-                print(f"Epoch: {epoch}, Batch: {i+1}, Loss: {loss.item()}, Accuracy: {accuracy}")
+                if do_adversary:
+                    writer.add_scalar('Adversary Loss/train', adv_loss.item()/total, epoch * len(train_loader) + i)
+                    writer.add_scalar('Final Loss/train', final_loss/total, epoch * len(train_loader) + i)
 
                 total = 0
-                correct = 0
-                loss = 0
+                loss_progress = 0
+                adv_loss_progress = 0
 
-        torch.save(model.state_dict(), f"checkpoints8/model1_{epoch}.pth")
+        torch.save(model.state_dict(), f"checkpoints_fixed_2/model_{epoch}.pth")
+        torch.save(adversary.state_dict(), f"checkpoints_fixed_2/adversary_{epoch}.pth")
+
+        # switch to interventions
+        # if epoch == 5:
+        #     print('switching sides')
+        #     # do_adversary = True
+        #     do_mixup = True
+        #     train_loader.dataset.set_do_mixup(True)
 
     # Close the writer
     writer.close()
@@ -136,8 +177,6 @@ def test_model_sex(ckpt):
     model = SimpleNet(3, 7)
     model.load_state_dict(torch.load(ckpt))
     model.eval()
-
-
     
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -200,7 +239,21 @@ def test_model_sex(ckpt):
         print()
 
 if __name__ == '__main__':
-    train_model()
+
+    n = 2
+    if n == 0:
+        train_model()
+    elif n == 1:
+        for i in range(0, 101):
+            path = f"checkpoints_fixed_1/model_{i}.pth"
+            test_model_sex(path)
+    elif n == 2:
+        for i in range(0, 101):
+            path = f"checkpoints_fixed_2/model_{i}.pth"
+            test_model_sex(path)
     # for i in range(70, 100):
     #     path = f"checkpoints8/model1_{i}.pth"
     #     test_model_fairness(path)
+    # for i in range(0, 30):
+    #     path = f"checkpoints_fixed_1/model_{i}.pth"
+    #     test_model_sex(path)
